@@ -6,11 +6,10 @@ import (
 	"fmt"
 	"io/ioutil"
 	"net/http"
-	"os/user"
-	"path/filepath"
 	"time"
 
 	"github.com/google/go-querystring/query"
+	"github.com/mitchellh/go-homedir"
 )
 
 type Credentials struct {
@@ -33,22 +32,10 @@ type Config struct {
 }
 
 const (
-	RedditAuthURL        = "https://www.reddit.com/api/v1/access_token"
-	RedditAPIURL         = "https://oauth.reddit.com"
-	defaultConfigFile    = ".reddit_creds"
-	UseDefaultConfigFile = ""
+	RedditAuthURL     = "https://www.reddit.com/api/v1/access_token"
+	RedditAPIURL      = "https://oauth.reddit.com"
+	DefaultConfigFile = "~/.reddit_creds"
 )
-
-func getFilename(file string) (string, error) {
-	if file != UseDefaultConfigFile {
-		return file, nil
-	}
-	current, err := user.Current()
-	if err != nil {
-		return "", fmt.Errorf("failed to detect current user: %v", err)
-	}
-	return filepath.Join(current.HomeDir, defaultConfigFile), nil
-}
 
 func loadConfig(file string) (Config, error) {
 	data, err := ioutil.ReadFile(file)
@@ -79,8 +66,8 @@ func notZero(key string, isNonZero bool) string {
 	return "No " + key + " present. "
 }
 
-func ScriptAuth(configFile string) (Config, error) {
-	configFile, err := getFilename(configFile)
+func ScriptAuth(configFile string, client *http.Client) (Config, error) {
+	configFile, err := homedir.Expand(configFile)
 	if err != nil {
 		return Config{}, err
 	}
@@ -91,7 +78,7 @@ func ScriptAuth(configFile string) (Config, error) {
 	if cfg.AuthToken.Token != "" && time.Unix(cfg.AuthToken.Expires, 0).After(time.Now()) {
 		return cfg, nil
 	}
-	if cfg.AuthToken, err = requestToken(cfg.Credentials); err != nil {
+	if cfg.AuthToken, err = requestToken(cfg.Credentials, client); err != nil {
 		return Config{}, err
 	}
 	toStore, err := json.Marshal(cfg)
@@ -137,7 +124,6 @@ func (s *Stream) indexValid() bool { return s.index >= 0 && s.index < len(s.list
 
 func (s *Stream) Next() bool {
 	if s.err != nil {
-		fmt.Println("errr!")
 		return false
 	}
 	if s.indexValid() {
@@ -147,11 +133,10 @@ func (s *Stream) Next() bool {
 		// We have cached data
 		return true
 	}
-	if s.listing.Before == "" && s.index != -1 {
-		fmt.Println("dry")
+	if s.listing.After == "" && s.index != -1 {
 		return false
 	}
-	s.lister.List().After = s.listing.Before
+	s.lister.List().After = s.listing.After
 	url, err := s.lister.URL()
 	if err != nil {
 		s.err = err
@@ -163,7 +148,7 @@ func (s *Stream) Next() bool {
 		return false
 	}
 	s.listing = *(t.Data.(*Listing))
-	fmt.Println("read", url, len(s.listing.Children))
+	s.lister.List().Count += len(s.listing.Children)
 	return s.indexValid()
 }
 
@@ -222,8 +207,18 @@ func (t *TopPosts) URL() (string, error) {
 
 func (t *TopPosts) List() *ListingOptions { return &t.ListingOptions }
 
+type doer interface {
+	do(req *http.Request, client *http.Client) (*http.Response, error)
+}
+
+type passthroughDoer struct {}
+
+func (passthroughDoer) do(req *http.Request, client *http.Client) (*http.Response, error) { return client.Do(req) }
+
+var defaultDoer = passthroughDoer{}
+
 func httpRequest(req *http.Request, client *http.Client) ([]byte, error) {
-	resp, err := client.Do(req)
+	resp, err := defaultDoer.do(req, client)
 	if err != nil {
 		return nil, fmt.Errorf("http request to %v failed: %v", req.URL, err)
 	}
@@ -238,7 +233,7 @@ func httpRequest(req *http.Request, client *http.Client) ([]byte, error) {
 	return data, nil
 }
 
-func requestToken(c Credentials) (AuthToken, error) {
+func requestToken(c Credentials, client *http.Client) (AuthToken, error) {
 	formData := fmt.Sprintf("grant_type=password&username=%s&password=%s", c.Username, c.Password)
 	body := bytes.NewBufferString(formData)
 
@@ -251,7 +246,7 @@ func requestToken(c Credentials) (AuthToken, error) {
 	req.SetBasicAuth(c.ClientID, c.ClientSecret)
 
 	authTime := time.Now()
-	data, err := httpRequest(req, http.DefaultClient)
+	data, err := httpRequest(req, client)
 	if err != nil {
 		return AuthToken{}, err
 	}
