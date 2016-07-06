@@ -1,4 +1,4 @@
-package reddit_go
+package reddit
 
 import (
 	"bytes"
@@ -7,39 +7,51 @@ import (
 	"io/ioutil"
 	"net/http"
 
-	"github.com/google/go-querystring/query"
-	"github.com/mitchellh/go-homedir"
-	"github.com/jonboulle/clockwork"
 	"time"
+
+	"github.com/jonboulle/clockwork"
+	"github.com/mitchellh/go-homedir"
 )
 
-var clock clockwork.Clock = clockwork.NewRealClock()
+var clock = clockwork.NewRealClock()
 
+// Credentials contains script credentials for a reddit developer account.
 type Credentials struct {
-	Username     string `json:"username"`
-	Password     string `json:"password"`
-	ClientID     string `json:"clientID"`
-	ClientSecret string `json:"client_secret"`
-	UserAgent    string `json:"user_agent"`
+	Username     string `json:"username"`	// Reddit username of the developer account.
+	Password     string `json:"password"`	// Password for the above user.
+	ClientID     string `json:"clientID"`	// Client ID for the script app.
+	ClientSecret string `json:"client_secret"` // Client secret for the script app.
+	UserAgent    string `json:"user_agent"`	// User Agent to use when making requests.
 }
 
+// AuthToken contains an authentication token obtained via OAuth.
 type AuthToken struct {
-	Expires int64  `json:"expires"`
-	Token   string `json:"token"`
-	Type    string `json:"type"`
+	Expires int64  `json:"expires"` // Expirations time as seconds since the unix epoch
+	Token   string `json:"token"`	// OAuth token
+	Type    string `json:"type"`	// Type of token (usually just bearer)
 }
 
+// Config contains configuration needed to perform reddit API requests. This consists of
+// credentials used to obtain a token and the current token. The credentials must be provided
+// by the user of this library. Calling AuthScript then authenticates the client and populates
+// the AuthToken.
 type Config struct {
 	Credentials Credentials `json:"credentials"`
 	AuthToken   AuthToken   `json:"token"`
 }
 
 const (
+	// RedditAuthURL is the URL used to obtain an authentication token.
 	RedditAuthURL     = "https://www.reddit.com/api/v1/access_token"
+	// RedditAPIURL is the base URL used to make API calls.
 	RedditAPIURL      = "https://oauth.reddit.com"
+	// DefaultConfigFile is the default file used to store API credentials.
 	DefaultConfigFile = "~/.reddit_creds"
 )
 
+// LoadConfig loads and validates a Config structure stored as JSON from a configuration file.
+// If the file path starts with ~ this is expanded to the home directory of the user. All fields
+// in the Credentials field must be non-empty.
 func LoadConfig(file string) (*Config, error) {
 	file, err := homedir.Expand(file)
 	if err != nil {
@@ -73,18 +85,9 @@ func notZero(key string, isNonZero bool) string {
 	return "No " + key + " present. "
 }
 
-func (c *Config) ScriptAuth(client *http.Client) error {
-	if c.AuthToken.Token != "" && time.Unix(c.AuthToken.Expires, 0).After(clock.Now()) {
-		return nil
-	}
-	token, err := requestToken(c.Credentials, client)
-	if err != nil {
-		return err
-	}
-	c.AuthToken = token
-	return nil
-}
-
+// Save saves a config in JSON format to the provided file.
+// If the file path starts with ~ this is expanded to the home directory of the user. No validation is
+// performed on the Config prior to saving.
 func (c *Config) Save(file string) error {
 	file, err := homedir.Expand(file)
 	if err != nil {
@@ -100,121 +103,23 @@ func (c *Config) Save(file string) error {
 	return nil
 }
 
-func (c *Config) Get(client *http.Client, url string, val interface{}) error {
-	req, err := http.NewRequest(http.MethodGet, url, nil)
-	if err != nil {
-		return fmt.Errorf("failed to create request for %s: %v", url, err)
+// AuthScript authenticates the client against reddit's API servers using the method described in
+// https://github.com/reddit/reddit/wiki/OAuth2-Quick-Start-Example. If Config.AuthToken holds a
+// valid token, no authentication is performed.
+//
+// If authentication is successful Config.AuthToken is populated with the received authentication token.
+// Use Config.Save to save this authentication token.
+func (c *Config) AuthScript(client *http.Client) error {
+	if c.AuthToken.Token != "" && time.Unix(c.AuthToken.Expires, 0).After(clock.Now()) {
+		return nil
 	}
-	req.Header.Add("User-Agent", c.Credentials.UserAgent)
-	req.Header.Add("Authorization", fmt.Sprintf("%s %s", c.AuthToken.Type, c.AuthToken.Token))
-
-	data, err := httpRequest(req, client)
+	token, err := requestToken(c.Credentials, client)
 	if err != nil {
 		return err
 	}
-	if err := json.Unmarshal(data, val); err != nil {
-		return fmt.Errorf("failed to parse response from %s: %v", url, err)
-	}
+	c.AuthToken = token
 	return nil
 }
-
-type Stream struct {
-	c       *Config
-	client  *http.Client
-	lister  Lister
-	listing Listing
-	index   int
-	err     error
-}
-
-func (s *Stream) Error() error { return s.err }
-
-func (s *Stream) indexValid() bool { return s.index >= 0 && s.index < len(s.listing.Children) }
-
-func (s *Stream) Next() bool {
-	if s.err != nil {
-		return false
-	}
-	if s.indexValid() {
-		s.index++
-	}
-	if s.indexValid() {
-		// We have cached data
-		return true
-	}
-	if s.listing.After == "" && s.index != -1 {
-		return false
-	}
-	s.lister.List().After = s.listing.After
-	url, err := s.lister.URL()
-	if err != nil {
-		s.err = err
-		return false
-	}
-	var t Thing
-	s.index, s.err = 0, s.c.Get(s.client, url, &t)
-	if s.err != nil {
-		return false
-	}
-	s.listing = *(t.Data.(*Listing))
-	s.lister.List().Count += len(s.listing.Children)
-	return s.indexValid()
-}
-
-func (s *Stream) Thing() Thing {
-	if s.err == nil && s.indexValid() {
-		return s.listing.Children[s.index]
-	}
-	return Thing{}
-}
-
-func (c *Config) Stream(client *http.Client, lister Lister) *Stream {
-	return &Stream{c: c, client: client, lister: lister, index: -1}
-}
-
-type TopDuration string
-
-const (
-	TopHour  TopDuration = "hour"
-	TopDay   TopDuration = "day"
-	TopWeek  TopDuration = "week"
-	TopMonth TopDuration = "month"
-	TopYear  TopDuration = "year"
-	TopAll   TopDuration = "all"
-)
-
-type ListingOptions struct {
-	After  string `url:"after,omitempty"`
-	Before string `url:"before,omitempty"`
-	Count  int    `url:"count,omitempty"`
-	Limit  int    `url:"limit,omitempty"`
-	Show   string `url:"show,omitempty"`
-}
-
-type URLer interface {
-	URL() (string, error)
-}
-
-type Lister interface {
-	URLer
-	List() *ListingOptions
-}
-
-type TopPosts struct {
-	ListingOptions
-	SubReddit string      `url:"-"`
-	Duration  TopDuration `url:"t,omitempty"`
-}
-
-func (t *TopPosts) URL() (string, error) {
-	v, err := query.Values(t)
-	if err != nil {
-		return "", err
-	}
-	return fmt.Sprintf("%s/r/%s/top.json?%s", RedditAPIURL, t.SubReddit, v.Encode()), nil
-}
-
-func (t *TopPosts) List() *ListingOptions { return &t.ListingOptions }
 
 type doer interface {
 	do(req *http.Request, client *http.Client) (*http.Response, error)

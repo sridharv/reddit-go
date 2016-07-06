@@ -1,3 +1,5 @@
 # Minimal Reddit API wrapper for Go.
 
-__This is a work in progress and contains bugs. DO NOT USE.__
+_This is a work in progress and may contain bugs. It has only been tested for the top posts query._
+
+Please see the godoc for usage.

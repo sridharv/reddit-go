@@ -1,4 +1,4 @@
-package reddit_go
+package reddit
 
 import (
 	"encoding/json"
@@ -23,6 +23,9 @@ type thingJSON struct {
 	Data json.RawMessage `json:"data"`
 }
 
+// UnmarshalJSON implements json.Unmarshaller for Thing. It performs this in two passes. In the
+// first pass the data is left unmarshalled. The value of kind is then used to determine the struct type
+// for Data.
 func (t *Thing) UnmarshalJSON(b []byte) error {
 	var j thingJSON
 	if err := json.Unmarshal(b, &j); err != nil {
@@ -79,11 +82,15 @@ type Created struct {
 	CreatedUTC float64 `json:"created_utc"`
 }
 
+// Edited denotes the current edit state of a Thing. If Edited is true, Unix will
+// hold the last edited time as seconds since the unix epoch.
 type Edited struct {
 	Unix   float64
 	Edited bool
 }
 
+// UnmarshalJSON implement json.Unmarshaller for Edited. It expects false if
+// no edits were performed, or a float timestamp of when the last edit was performed.
 func (e *Edited) UnmarshalJSON(b []byte) error {
 	str := string(b)
 	if str == "false" {
@@ -98,9 +105,11 @@ func (e *Edited) UnmarshalJSON(b []byte) error {
 	return nil
 }
 
+// MarshalJSON implements json.Marshaler for Edited. It returns false if e.Edited is false
+// and a float timestamp if not.
 func (e *Edited) MarshalJSON() ([]byte, error) {
 	if e.Edited {
-		return []byte(fmt.Sprintf("%d", e.Unix)), nil
+		return []byte(fmt.Sprintf("%.0f", e.Unix)), nil
 	}
 	return []byte("false"), nil
 }
@@ -136,7 +145,7 @@ type Comment struct {
 	Distinguished       string  `json:"distinguished"`
 }
 
-// Comment represents a single link on reddit.
+// Link represents a single link on reddit.
 //
 // See https://github.com/reddit/reddit/wiki/JSON
 type Link struct {
@@ -172,11 +181,14 @@ type Link struct {
 	Stickied            bool            `json:"stickied"`
 }
 
+// HeaderSize is a header size for a subreddit.
 type HeaderSize struct {
 	Width  int
 	Height int
 }
 
+// UnmarshalJSON implements json.Unmarshaler for HeaderSize. It converts an array of ints
+// into a HeaderSize.
 func (h *HeaderSize) UnmarshalJSON(b []byte) error {
 	v := []int{}
 	if err := json.Unmarshal(b, &v); err != nil {
@@ -192,6 +204,7 @@ func (h *HeaderSize) UnmarshalJSON(b []byte) error {
 	return nil
 }
 
+// MarshalJSON implements json.Marshaler for HeaderSize. It converts HeaderSize into an array of ints.
 func (h *HeaderSize) MarshalJSON() ([]byte, error) {
 	if h == nil {
 		return []byte("null"), nil
