@@ -6,11 +6,14 @@ import (
 	"fmt"
 	"io/ioutil"
 	"net/http"
-	"time"
 
 	"github.com/google/go-querystring/query"
 	"github.com/mitchellh/go-homedir"
+	"github.com/jonboulle/clockwork"
+	"time"
 )
+
+var clock clockwork.Clock = clockwork.NewRealClock()
 
 type Credentials struct {
 	Username     string `json:"username"`
@@ -37,14 +40,18 @@ const (
 	DefaultConfigFile = "~/.reddit_creds"
 )
 
-func loadConfig(file string) (Config, error) {
+func LoadConfig(file string) (*Config, error) {
+	file, err := homedir.Expand(file)
+	if err != nil {
+		return nil, err
+	}
 	data, err := ioutil.ReadFile(file)
 	if err != nil {
-		return Config{}, fmt.Errorf("failed to read contents of %s: %v", file, err)
+		return nil, fmt.Errorf("failed to read contents of %s: %v", file, err)
 	}
 	var ret Config
 	if err := json.Unmarshal(data, &ret); err != nil {
-		return ret, fmt.Errorf("failed to unmarshal contents of %s to json: %v", file, err)
+		return nil, fmt.Errorf("failed to unmarshal contents of %s to json: %v", file, err)
 	}
 
 	errors := notZero("username", ret.Credentials.Username != "") +
@@ -54,9 +61,9 @@ func loadConfig(file string) (Config, error) {
 		notZero("user agent", ret.Credentials.UserAgent != "")
 
 	if errors != "" {
-		return Config{}, fmt.Errorf("%s", errors)
+		return nil, fmt.Errorf("%s", errors)
 	}
-	return ret, nil
+	return &ret, nil
 }
 
 func notZero(key string, isNonZero bool) string {
@@ -66,32 +73,34 @@ func notZero(key string, isNonZero bool) string {
 	return "No " + key + " present. "
 }
 
-func ScriptAuth(configFile string, client *http.Client) (Config, error) {
-	configFile, err := homedir.Expand(configFile)
+func (c *Config) ScriptAuth(client *http.Client) error {
+	if c.AuthToken.Token != "" && time.Unix(c.AuthToken.Expires, 0).After(clock.Now()) {
+		return nil
+	}
+	token, err := requestToken(c.Credentials, client)
 	if err != nil {
-		return Config{}, err
+		return err
 	}
-	cfg, err := loadConfig(configFile)
-	if err != nil {
-		return Config{}, fmt.Errorf("failed to read creds: %v", err)
-	}
-	if cfg.AuthToken.Token != "" && time.Unix(cfg.AuthToken.Expires, 0).After(time.Now()) {
-		return cfg, nil
-	}
-	if cfg.AuthToken, err = requestToken(cfg.Credentials, client); err != nil {
-		return Config{}, err
-	}
-	toStore, err := json.Marshal(cfg)
-	if err != nil {
-		return Config{}, fmt.Errorf("marshalling config failed: %v", err)
-	}
-	if err := ioutil.WriteFile(configFile, toStore, 0600); err != nil {
-		return Config{}, fmt.Errorf("failed to save auth token to %s: %v", configFile, err)
-	}
-	return cfg, nil
+	c.AuthToken = token
+	return nil
 }
 
-func (c Config) Get(client *http.Client, url string, val interface{}) error {
+func (c *Config) Save(file string) error {
+	file, err := homedir.Expand(file)
+	if err != nil {
+		return err
+	}
+	toStore, err := json.Marshal(c)
+	if err != nil {
+		return fmt.Errorf("marshalling config failed: %v", err)
+	}
+	if err := ioutil.WriteFile(file, toStore, 0600); err != nil {
+		return fmt.Errorf("failed to save auth token to %s: %v", file, err)
+	}
+	return nil
+}
+
+func (c *Config) Get(client *http.Client, url string, val interface{}) error {
 	req, err := http.NewRequest(http.MethodGet, url, nil)
 	if err != nil {
 		return fmt.Errorf("failed to create request for %s: %v", url, err)
@@ -110,7 +119,7 @@ func (c Config) Get(client *http.Client, url string, val interface{}) error {
 }
 
 type Stream struct {
-	c       Config
+	c       *Config
 	client  *http.Client
 	lister  Lister
 	listing Listing
@@ -159,7 +168,7 @@ func (s *Stream) Thing() Thing {
 	return Thing{}
 }
 
-func (c Config) Stream(client *http.Client, lister Lister) *Stream {
+func (c *Config) Stream(client *http.Client, lister Lister) *Stream {
 	return &Stream{c: c, client: client, lister: lister, index: -1}
 }
 
@@ -211,11 +220,13 @@ type doer interface {
 	do(req *http.Request, client *http.Client) (*http.Response, error)
 }
 
-type passthroughDoer struct {}
+type passthroughDoer struct{}
 
-func (passthroughDoer) do(req *http.Request, client *http.Client) (*http.Response, error) { return client.Do(req) }
+func (passthroughDoer) do(req *http.Request, client *http.Client) (*http.Response, error) {
+	return client.Do(req)
+}
 
-var defaultDoer = passthroughDoer{}
+var defaultDoer doer = passthroughDoer{}
 
 func httpRequest(req *http.Request, client *http.Client) ([]byte, error) {
 	resp, err := defaultDoer.do(req, client)
@@ -245,7 +256,7 @@ func requestToken(c Credentials, client *http.Client) (AuthToken, error) {
 	req.Header.Add("User-Agent", c.UserAgent)
 	req.SetBasicAuth(c.ClientID, c.ClientSecret)
 
-	authTime := time.Now()
+	authTime := clock.Now()
 	data, err := httpRequest(req, client)
 	if err != nil {
 		return AuthToken{}, err
