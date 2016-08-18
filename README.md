@@ -19,3 +19,26 @@ This currently only supports OAuth for script apps. It does not support refreshi
   * A simple API to obtain and store an OAuth token for a script app using these credentials.
   * An API to perform GET requests using the obtained token.
   * An API to stream listings.
+
+## Example Usage
+
+```
+cfg, err := reddit.LoadConfig(reddit.DefaultConfigFile)
+if err != nil {
+    log.Fatal(err)
+}
+if err := cfg.AuthScript(http.DefaultClient); err != nil {
+    log.Fatal(err)
+}
+// Print top posts of the day from /r/golang
+stream := cfg.Stream(http.DefaultClient, &reddit.TopPosts{SubReddit: "golang", Duration: reddit.TopDay})
+for stream.Next() {
+    thing := stream.Thing()
+    link := thing.Data.(*reddit.Link)
+    fmt.Println(link.Title, link.URL)
+}
+if err := stream.Error(); err != nil {
+    log.Fatal(err)
+}
+```
+
